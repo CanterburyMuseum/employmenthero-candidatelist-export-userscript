@@ -2,7 +2,7 @@
 // ==UserScript==
 // @name         Employment Hero - Export CV Reviewed
 // @namespace    https://chatgpt.com/
-// @version      0.1.0
+// @version      0.2.1
 // @description  Export first name, last name and location for all CV Reviewed applicants to CSV.
 // @match        https://*.employmenthero.com/*
 // @match        https://employmenthero.com/*
@@ -15,9 +15,11 @@
 
   const API_ORIGIN = 'https://services.employmenthero.com';
   const API_PATH = '/ats/api/v1/candidate_jobs';
+  const ATS_ROUTE = /^\/app\/v2\/organisations\/\d+\/ats\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/?$/i;
   const STAGE = 'CV Reviewed';
   const REQUESTED_PAGE_SIZE = 1000;
   const MAX_PAGES = 100;
+  const ROUTE_CHECK_INTERVAL_MS = 500;
 
   // Authentication is kept only in this tab's memory. Never log or persist it.
   const state = {
@@ -25,8 +27,10 @@
     jwt: null,
     stageCount: null,
     exporting: false,
+    routePath: null,
     ui: null,
   };
+  let lastSeenUrl = location.href;
 
   const originalFetch = window.fetch;
   const originalXhrOpen = XMLHttpRequest.prototype.open;
@@ -38,21 +42,69 @@
     try {
       const url = new URL(String(value), location.href);
       if (url.origin !== API_ORIGIN) return null;
-      if (url.pathname !== API_PATH && url.pathname !== `${API_PATH}/pipeline`) return null;
       return url;
     } catch {
       return null;
     }
   }
 
+  function currentRouteJobId() {
+    if (location.hostname !== 'secure.employmenthero.com') return null;
+    if (new URLSearchParams(location.search).has('candidate_id')) return null;
+    return location.pathname.match(ATS_ROUTE)?.[1] ?? null;
+  }
+
+  function syncRoute() {
+    lastSeenUrl = location.href;
+    const routeJobId = currentRouteJobId();
+    if (location.pathname !== state.routePath) {
+      state.routePath = location.pathname;
+      state.jobId = routeJobId;
+      state.stageCount = null;
+    } else if (routeJobId && !state.jobId) {
+      state.jobId = routeJobId;
+    }
+    updateUi();
+  }
+
+  // React/SPA navigation does not reload userscripts or fire popstate on pushState.
+  for (const method of ['pushState', 'replaceState']) {
+    const original = history[method];
+    history[method] = function (...args) {
+      const result = original.apply(this, args);
+      syncRoute();
+      return result;
+    };
+  }
+  window.addEventListener('popstate', syncRoute);
+  window.addEventListener('hashchange', syncRoute);
+  window.addEventListener('pageshow', syncRoute);
+  document.addEventListener('DOMContentLoaded', syncRoute, { once: true });
+  if (window.navigation?.addEventListener) {
+    window.navigation.addEventListener('currententrychange', syncRoute);
+  }
+
+  // Some SPAs replace History API methods after userscripts have hooked them.
+  // Comparing the URL is a cheap fallback and also repairs a detached panel.
+  setInterval(() => {
+    if (location.href !== lastSeenUrl ||
+        (document.body && currentRouteJobId() &&
+         (!state.ui || !state.ui.panel.isConnected))) {
+      syncRoute();
+    }
+  }, ROUTE_CHECK_INTERVAL_MS);
+
   function rememberRequest(rawUrl, headers) {
     const url = parseApiUrl(rawUrl);
     if (!url) return;
 
-    const jobId = url.searchParams.get('job_id');
-    if (jobId && jobId !== state.jobId) {
+    // The app may authenticate a different ATS request before loading candidates.
+    // Keep the most recent JWT, but use the visible ATS route as the job identity.
+    const isCandidateRequest = url.pathname === API_PATH
+      || url.pathname === `${API_PATH}/pipeline`;
+    const jobId = isCandidateRequest ? url.searchParams.get('job_id') : null;
+    if (jobId && currentRouteJobId() && jobId !== state.jobId) {
       state.jobId = jobId;
-      state.jwt = null;
       state.stageCount = null;
     }
 
@@ -65,7 +117,7 @@
       }
     }
 
-    updateUi();
+    syncRoute();
   }
 
   function rememberPipeline(rawUrl, responseData) {
@@ -143,7 +195,10 @@
   }
 
   function updateUi() {
-    if (!state.jobId) return;
+    if (!currentRouteJobId()) {
+      if (state.ui) state.ui.panel.style.display = 'none';
+      return;
+    }
     if (!document.body) {
       document.addEventListener('DOMContentLoaded', updateUi, { once: true });
       return;
@@ -152,7 +207,7 @@
     if (!state.ui) {
       const panel = document.createElement('div');
       panel.style.cssText = [
-        'position:fixed', 'right:16px', 'bottom:16px', 'z-index:2147483647',
+        'position:fixed', 'left:16px', 'bottom:16px', 'z-index:2147483647',
         'font:13px/1.4 system-ui,sans-serif', 'background:#fff',
         'color:#1f2937', 'padding:10px', 'border:1px solid #cbd5e1',
         'border-radius:10px', 'box-shadow:0 4px 18px #0002',
@@ -174,8 +229,11 @@
       panel.append(button, status);
       document.body.appendChild(panel);
       state.ui = { panel, button, status };
+    } else if (!state.ui.panel.isConnected) {
+      document.body.appendChild(state.ui.panel);
     }
 
+    state.ui.panel.style.display = '';
     state.ui.button.disabled = state.exporting || !state.jwt;
     state.ui.button.style.opacity = state.ui.button.disabled ? '0.6' : '1';
     if (!state.exporting) {
@@ -279,7 +337,7 @@
   }
 
   async function exportCandidates() {
-    if (state.exporting || !state.jobId || !state.jwt) return;
+    if (state.exporting || !currentRouteJobId() || !state.jobId || !state.jwt) return;
     state.exporting = true;
     updateUi();
 
@@ -317,4 +375,7 @@
       }
     }
   }
+
+  // Apply the initial URL too (including direct loads into an ATS job).
+  syncRoute();
 })();
