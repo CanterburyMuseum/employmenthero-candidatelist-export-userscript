@@ -2,7 +2,9 @@
 // ==UserScript==
 // @name         Employment Hero - Export CV Reviewed
 // @namespace    https://chatgpt.com/
-// @version      0.2.1
+// @version      0.2.2
+// @updateURL    https://raw.githubusercontent.com/CanterburyMuseum/employmenthero-candidatelist-export-userscript/main/employmenthero-tampermonkey.user.js
+// @downloadURL  https://raw.githubusercontent.com/CanterburyMuseum/employmenthero-candidatelist-export-userscript/main/employmenthero-tampermonkey.user.js
 // @description  Export first name, last name and location for all CV Reviewed applicants to CSV.
 // @match        https://*.employmenthero.com/*
 // @match        https://employmenthero.com/*
